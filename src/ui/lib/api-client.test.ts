@@ -58,6 +58,9 @@ describe("api-client protocol routing", () => {
                     status: "ready_for_complete",
                     currency: "USD",
                     ucp: {
+                      capabilities: {
+                        "dev.ucp.shopping.checkout": [{ version: "2026-01-11" }],
+                      },
                       payment_handlers: {
                         "com.example.processor_tokenizer": [{ id: "processor_tokenizer" }],
                       },
@@ -79,6 +82,21 @@ describe("api-client protocol routing", () => {
                       { type: "tax", label: "Tax", amount: 200 },
                       { type: "total", label: "Total", amount: 2700 },
                     ],
+                    discounts: {
+                      codes: ["SAVE10"],
+                      applied: [
+                        {
+                          id: "applied_coupon_save10",
+                          code: "SAVE10",
+                          title: "Save 10%",
+                          amount: 250,
+                          automatic: false,
+                          method: "each",
+                          priority: 100,
+                          allocations: [{ path: "$.line_items[0]", amount: 250 }],
+                        },
+                      ],
+                    },
                     messages: [],
                   },
                 },
@@ -97,12 +115,43 @@ describe("api-client protocol routing", () => {
     expect(session.status).toBe("ready_for_payment");
     expect(session.protocol).toBe("ucp");
     expect(session.ucpContextId).toBe("ctx_123");
+    expect(session.ucpRawStatus).toBe("ready_for_complete");
+    expect(session.ucpPlatformProfileUrl).toBe("https://platform.example/profile");
     expect(session.ucpPaymentHandlerId).toBe("processor_tokenizer");
+    expect(session.ucpPaymentHandlerIds).toEqual(["processor_tokenizer"]);
+    expect(session.ucpPaymentHandlerNamespaces).toEqual(["com.example.processor_tokenizer"]);
+    expect(session.capabilities?.extensions?.map((extension) => extension.name)).toEqual([
+      "dev.ucp.shopping.checkout",
+    ]);
+    expect(session.discounts).toEqual({
+      codes: ["SAVE10"],
+      applied: [
+        {
+          id: "applied_coupon_save10",
+          code: "SAVE10",
+          coupon: { id: "applied_coupon_save10", name: "Save 10%" },
+          amount: 250,
+          automatic: false,
+          method: "each",
+          priority: 100,
+          allocations: [{ path: "$.line_items[0]", amount: 250 }],
+        },
+      ],
+      rejected: [],
+    });
 
     const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
     const headers = init.headers as Record<string, string>;
     expect(headers["UCP-Agent"]).toContain("profile=");
     expect(headers["X-A2A-Extensions"]).toBe("https://ucp.dev/2026-01-23/specification/reference/");
+
+    const body = JSON.parse(String(init.body)) as {
+      params: { message: { parts: Array<{ data?: Record<string, unknown> }> } };
+    };
+    const actionPart = body.params.message.parts[0]?.data;
+    expect(actionPart?.line_items).toEqual([{ item: { id: "prod_1" }, quantity: 1 }]);
+    expect(actionPart).not.toHaveProperty("items");
+    expect(actionPart).not.toHaveProperty("coupons");
   });
 
   it("infers line-item discount from UCP subtotal", async () => {
@@ -168,6 +217,10 @@ describe("api-client protocol routing", () => {
                     id: "cs_ucp_1",
                     status: "completed",
                     currency: "USD",
+                    order: {
+                      id: "order_ucp_123",
+                      permalink_url: "https://shop.example.com/orders/order_ucp_123",
+                    },
                     ucp: {
                       payment_handlers: {
                         "com.example.processor_tokenizer": [{ id: "processor_tokenizer" }],
@@ -191,11 +244,17 @@ describe("api-client protocol routing", () => {
       contextId: "ctx_123",
       paymentHandlerId: "processor_tokenizer",
     };
-    await completeCheckoutByProtocol("ucp", sessionRef, {
+    const session = await completeCheckoutByProtocol("ucp", sessionRef, {
       payment_data: {
         token: "vt_123",
         provider: "stripe",
       },
+    });
+
+    expect(session.order).toEqual({
+      id: "order_ucp_123",
+      checkout_session_id: "cs_ucp_1",
+      permalink_url: "https://shop.example.com/orders/order_ucp_123",
     });
 
     const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
