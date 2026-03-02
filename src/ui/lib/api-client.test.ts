@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createCheckoutSessionByProtocol,
   completeCheckoutByProtocol,
+  getCheckoutSessionByProtocol,
   type ProtocolSessionRef,
 } from "./api-client";
 
@@ -12,7 +13,7 @@ describe("api-client protocol routing", () => {
   });
 
   it("uses ACP endpoint when protocol is acp", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    vi.mocked(global.fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           id: "cs_1",
@@ -38,12 +39,42 @@ describe("api-client protocol routing", () => {
       items: [{ id: "prod_1", quantity: 1 }],
     });
 
-    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
+    const [url] = vi.mocked(global.fetch).mock.calls[0] ?? [];
     expect(url).toBe("/api/proxy/merchant/checkout_sessions");
   });
 
+  it("fetches ACP checkout state using GET when protocol is acp", async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "cs_1",
+          status: "ready_for_payment",
+          currency: "usd",
+          payment_provider: {
+            provider: "stripe",
+            supported_payment_methods: [
+              { type: "card", supported_card_networks: ["visa", "mastercard"] },
+            ],
+          },
+          line_items: [],
+          fulfillment_options: [],
+          totals: [{ type: "total", display_text: "Total", amount: 2826 }],
+          messages: [],
+          links: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    await getCheckoutSessionByProtocol("acp", { sessionId: "cs_1" });
+
+    const [url, init] = vi.mocked(global.fetch).mock.calls[0] ?? [];
+    expect(url).toBe("/api/proxy/merchant/checkout_sessions/cs_1");
+    expect(init?.method).toBe("GET");
+  });
+
   it("uses A2A endpoint and normalizes UCP response", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    vi.mocked(global.fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -140,7 +171,11 @@ describe("api-client protocol routing", () => {
       rejected: [],
     });
 
-    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
+    const firstCall = vi.mocked(global.fetch).mock.calls[0];
+    if (!firstCall?.[1]) {
+      throw new Error("Expected fetch init options");
+    }
+    const [, init] = firstCall;
     const headers = init.headers as Record<string, string>;
     expect(headers["UCP-Agent"]).toContain("profile=");
     expect(headers["X-A2A-Extensions"]).toBe("https://ucp.dev/2026-01-23/specification/reference/");
@@ -154,8 +189,61 @@ describe("api-client protocol routing", () => {
     expect(actionPart).not.toHaveProperty("coupons");
   });
 
+  it("uses A2A get_checkout action when fetching UCP checkout state", async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: "req_get",
+          result: {
+            contextId: "ctx_123",
+            parts: [
+              {
+                data: {
+                  "a2a.ucp.checkout": {
+                    id: "cs_ucp_1",
+                    status: "ready_for_complete",
+                    currency: "USD",
+                    line_items: [],
+                    totals: [{ type: "total", label: "Total", amount: 2826 }],
+                    messages: [],
+                    ucp: {
+                      payment_handlers: {
+                        "com.example.processor_tokenizer": [{ id: "processor_tokenizer" }],
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    const session = await getCheckoutSessionByProtocol("ucp", {
+      sessionId: "cs_ucp_1",
+      contextId: "ctx_123",
+    });
+
+    expect(session.id).toBe("cs_ucp_1");
+    expect(session.status).toBe("ready_for_payment");
+
+    const firstCall = vi.mocked(global.fetch).mock.calls[0];
+    if (!firstCall?.[1]) {
+      throw new Error("Expected fetch init options");
+    }
+    const [, init] = firstCall;
+    const body = JSON.parse(String(init.body)) as {
+      params: { message: { parts: Array<{ data?: Record<string, unknown> }> } };
+    };
+    const actionPart = body.params.message.parts[0]?.data;
+    expect(actionPart?.action).toBe("get_checkout");
+  });
+
   it("infers line-item discount from UCP subtotal", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    vi.mocked(global.fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -203,7 +291,7 @@ describe("api-client protocol routing", () => {
   });
 
   it("sends tokenized payment instrument for UCP completion", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    vi.mocked(global.fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -257,7 +345,11 @@ describe("api-client protocol routing", () => {
       permalink_url: "https://shop.example.com/orders/order_ucp_123",
     });
 
-    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
+    const firstCall = vi.mocked(global.fetch).mock.calls[0];
+    if (!firstCall?.[1]) {
+      throw new Error("Expected fetch init options");
+    }
+    const [, init] = firstCall;
     const body = JSON.parse(String(init.body)) as {
       params: { message: { parts: Array<{ data?: Record<string, unknown> }> } };
     };
@@ -291,7 +383,7 @@ describe("api-client protocol routing", () => {
   });
 
   it("throws APIError when A2A returns json-rpc error payload", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    vi.mocked(global.fetch).mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           jsonrpc: "2.0",
