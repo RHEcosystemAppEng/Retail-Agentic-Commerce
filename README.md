@@ -208,10 +208,41 @@ docs/
 └── specs/
 ```
 
+## OpenShift Deployment
+
+The Retail Agentic Commerce Blueprint has been validated on **Red Hat OpenShift AI**. All OpenShift-specific files are isolated under the `openshift/` directory — no upstream files are permanently modified.
+
+| Mode | GPUs | Description |
+|------|------|-------------|
+| **Cloud API** (default) | 0 | Uses NVIDIA hosted APIs for LLM and embedding inference |
+| **Local NIM** | 2 | Self-hosted Nemotron-3-Nano LLM + EmbedQA embedding model |
+
+**Quick start (cloud API mode — no GPUs required):**
+
+```bash
+NVIDIA_API_KEY=nvapi-... \
+  bash openshift/deploy/helm/deploy-openshift.sh
+```
+
+**Quick start (local NIM mode — requires 2+ GPUs):**
+
+```bash
+NVIDIA_API_KEY=nvapi-... NGC_API_KEY=nvapi-... DEPLOY_NIMS=true \
+  bash openshift/deploy/helm/deploy-openshift.sh
+```
+
+For the full deployment guide, see **[OpenShift Deployment Guide](openshift/docs/deploy-openshift.md)**.
+
+**OpenShift deployment files:**
+- [`openshift/deploy/helm/deploy-openshift.sh`](openshift/deploy/helm/deploy-openshift.sh) — Automated deployment script
+- [`openshift/deploy/helm/values-openshift.yaml`](openshift/deploy/helm/values-openshift.yaml) — Configuration reference
+- [`openshift/docs/deploy-openshift.md`](openshift/docs/deploy-openshift.md) — Full deployment guide with 18 OpenShift challenges and solutions
+
 ## Documentation
 
 - [Docker Deployment](deploy/docker-deployment.md)
 - [Local Development](deploy/local-development.md)
+- [OpenShift Deployment](openshift/docs/deploy-openshift.md)
 - [Architecture](docs/architecture.md)
 - [Feature Breakdown](docs/features/index.md)
 - [ACP Spec](docs/specs/acp-spec.md)

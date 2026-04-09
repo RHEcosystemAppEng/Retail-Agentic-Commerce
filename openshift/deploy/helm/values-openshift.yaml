@@ -1,0 +1,321 @@
+# OpenShift-specific configuration reference for the Retail Agentic Commerce Blueprint.
+#
+# This file documents all configurable values used by the deploy script.
+# The blueprint uses Docker Compose upstream (no Helm chart), so the deploy
+# script creates Kubernetes resources directly via `oc apply`. This file
+# serves as a single-source-of-truth for configuration and can be adapted
+# for a future Helm chart.
+#
+# See openshift/docs/deploy-openshift.md for the full deployment guide.
+
+# ---------------------------------------------------------------------------
+# Namespace — overridden via $NAMESPACE env var.
+# ---------------------------------------------------------------------------
+namespace: agentic-commerce
+
+# ---------------------------------------------------------------------------
+# Image Pull Secret — pre-created by deploy script with Helm ownership labels.
+# Only needed when DEPLOY_NIMS=true (NIM images from nvcr.io).
+# Application images are built in the OpenShift internal registry.
+# ---------------------------------------------------------------------------
+imagePullSecret:
+  name: "ngc-secret"
+  create: false
+
+# ---------------------------------------------------------------------------
+# Application Credentials — pre-created by deploy script.
+# Contains NVIDIA_API_KEY, MERCHANT_API_KEY, PSP_API_KEY, WEBHOOK_SECRET.
+# ---------------------------------------------------------------------------
+appCredentials:
+  name: "app-credentials"
+  create: false
+
+# ---------------------------------------------------------------------------
+# Merchant API — Core backend service.
+# Handles checkout sessions, ACP/UCP protocol endpoints, agent orchestration.
+# Shares a SQLite database with PSP via the app-data PVC.
+# ---------------------------------------------------------------------------
+merchant:
+  image:
+    # Built by OpenShift BuildConfig from src/merchant/Dockerfile (repo root context).
+    # Replace with external registry path if using IMAGE_REGISTRY.
+    repository: image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/merchant
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 1
+  service:
+    # ClusterIP — OpenShift Routes handle external access.
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  env:
+    DATABASE_URL: "sqlite:////data/agentic_commerce.db"
+    PROMOTION_AGENT_URL: "http://promotion-agent:8002"
+    POST_PURCHASE_AGENT_URL: "http://post-purchase-agent:8003"
+    RECOMMENDATION_AGENT_URL: "http://recommendation-agent:8004"
+    # Webhook URLs use K8s service DNS (replaces Docker-internal hostnames).
+    WEBHOOK_URL: "http://ui:3000/api/webhooks/acp"
+    UCP_ORDER_WEBHOOK_URL: "http://ui:3000/api/webhooks/ucp"
+
+# ---------------------------------------------------------------------------
+# PSP (Payment Service Provider) — Simulated payment processor.
+# Shares SQLite DB with merchant. Pod affinity ensures same-node scheduling
+# for RWO PVC access.
+# ---------------------------------------------------------------------------
+psp:
+  image:
+    repository: image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/psp
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8001
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  env:
+    DATABASE_URL: "sqlite:////data/agentic_commerce.db"
+
+# ---------------------------------------------------------------------------
+# Apps SDK MCP Server — MCP tool server + embedded React widget.
+# Bridges merchant API, PSP, recommendation, and search agents.
+# ---------------------------------------------------------------------------
+appsSdk:
+  image:
+    repository: image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/apps-sdk
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 2091
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  env:
+    MERCHANT_API_URL: "http://merchant:8000"
+    PSP_API_URL: "http://psp:8001"
+    RECOMMENDATION_AGENT_URL: "http://recommendation-agent:8004"
+    SEARCH_AGENT_URL: "http://search-agent:8005"
+
+# ---------------------------------------------------------------------------
+# UI — Next.js three-panel protocol inspector.
+# Proxies API calls server-side (keys never exposed to browser).
+# ---------------------------------------------------------------------------
+ui:
+  image:
+    repository: image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/ui
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  env:
+    MERCHANT_API_URL: "http://merchant:8000"
+    PSP_API_URL: "http://psp:8001"
+    NEXT_PUBLIC_UCP_PLATFORM_PROFILE_URL: "http://merchant:8000/.well-known/ucp"
+
+# ---------------------------------------------------------------------------
+# Nginx — Reverse proxy that routes traffic to UI, merchant, PSP, Apps SDK.
+# Listens on port 8080 (not 80) to avoid privileged port issues under SCC.
+# The upstream uses port 80; we change to 8080 for OpenShift compatibility.
+# ---------------------------------------------------------------------------
+nginx:
+  image:
+    repository: docker.io/library/nginx
+    tag: "1.25.3-alpine"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+# ---------------------------------------------------------------------------
+# NAT Agents — NVIDIA NeMo Agent Toolkit powered AI agents.
+# All share a single container image built from src/agents/Dockerfile.
+# Each agent runs a different config file via `nat serve --config_file`.
+# ---------------------------------------------------------------------------
+agents:
+  image:
+    repository: image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/nat-agents
+    tag: "latest"
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+  promotion:
+    enabled: true
+    port: 8002
+    config: "configs/promotion.yml"
+
+  postPurchase:
+    enabled: true
+    port: 8003
+    config: "configs/post-purchase.yml"
+
+  recommendation:
+    enabled: true
+    port: 8004
+    config: "configs/recommendation-ultrafast.yml"
+    env:
+      MILVUS_URI: "http://milvus-standalone:19530"
+
+  search:
+    enabled: true
+    port: 8005
+    config: "configs/search.yml"
+    env:
+      MILVUS_URI: "http://milvus-standalone:19530"
+
+# ---------------------------------------------------------------------------
+# NIM Model Endpoints — configure how agents reach LLM and embedding services.
+#
+# MODE 1 (default): NVIDIA hosted API (build.nvidia.com). Zero GPUs needed.
+#   LLM:   https://integrate.api.nvidia.com/v1
+#   Embed: https://integrate.api.nvidia.com/v1
+#
+# MODE 2: Self-hosted NIMs (DEPLOY_NIMS=true). Requires 2 GPUs.
+#   LLM:   http://nim-llm:8000/v1
+#   Embed: http://nim-embedqa:8000/v1
+# ---------------------------------------------------------------------------
+nim:
+  llm:
+    # Cloud API settings (DEPLOY_NIMS=false)
+    cloudUrl: "https://integrate.api.nvidia.com/v1"
+    cloudModel: "nvidia/nemotron-3-nano-30b-a3b"
+    # Local NIM settings (DEPLOY_NIMS=true)
+    localUrl: "http://nim-llm:8000/v1"
+    localModel: "nvidia/nemotron-3-nano"
+
+  embed:
+    cloudUrl: "https://integrate.api.nvidia.com/v1"
+    cloudModel: "nvidia/nv-embedqa-e5-v5"
+    localUrl: "http://nim-embedqa:8000/v1"
+    localModel: "nvidia/nv-embedqa-e5-v5"
+
+# ---------------------------------------------------------------------------
+# LLM NIM — Nemotron-3-Nano (30B MoE, for agent reasoning and generation)
+# Requires 1 GPU with >= 48 GB VRAM. FP8 auto-selected on SM89+ (L40S/H100).
+# Does NOT fit on A100-40GB (BF16 weights ~38 GiB, no FP8 on SM80).
+# ---------------------------------------------------------------------------
+nimLlm:
+  enabled: false  # Set DEPLOY_NIMS=true in deploy script to enable
+  image:
+    repository: nvcr.io/nim/nvidia/nemotron-3-nano
+    tag: "1"
+    pullPolicy: IfNotPresent
+  service:
+    name: nim-llm
+    type: ClusterIP
+    port: 8000
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+    requests:
+      nvidia.com/gpu: 1
+  env:
+    - name: TOKENIZERS_PARALLELISM
+      value: "false"
+  shmSize: "16Gi"
+
+# ---------------------------------------------------------------------------
+# Embedding NIM — NV-EmbedQA-E5-v5 (for recommendation/search vector embeddings)
+# Small model, fits on any GPU with >= 8 GB VRAM.
+# ---------------------------------------------------------------------------
+nimEmbedqa:
+  enabled: false  # Set DEPLOY_NIMS=true in deploy script to enable
+  image:
+    repository: nvcr.io/nim/nvidia/nv-embedqa-e5-v5
+    tag: "1.6"
+    pullPolicy: IfNotPresent
+  service:
+    name: nim-embedqa
+    type: ClusterIP
+    port: 8000
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+    requests:
+      nvidia.com/gpu: 1
+  env:
+    - name: TOKENIZERS_PARALLELISM
+      value: "false"
+  shmSize: "8Gi"
+
+# ---------------------------------------------------------------------------
+# Infrastructure — Milvus vector database (deployed via official Helm chart).
+# The deploy script uses `helm upgrade --install milvus milvus/milvus` with
+# standalone mode (cluster.enabled=false). etcd and MinIO are included as
+# Helm sub-charts. Phoenix is intentionally omitted — agents work without it.
+#
+# These values are passed as --set flags to the Milvus Helm chart.
+# See: https://github.com/zilliztech/milvus-helm/blob/master/charts/milvus/values.yaml
+# ---------------------------------------------------------------------------
+milvus:
+  helmChart: "milvus/milvus"
+  standalone:
+    image:
+      tag: "v2.4.0"
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "8Gi"
+    persistence:
+      size: "10Gi"
+  etcd:
+    replicaCount: 1
+    persistence:
+      size: "5Gi"
+  minio:
+    mode: standalone
+    persistence:
+      size: "10Gi"
+
+# ---------------------------------------------------------------------------
+# Shared data PVC — SQLite database shared between merchant and PSP.
+# Uses ReadWriteOnce; pod affinity ensures both pods land on the same node.
+# Recreate strategy avoids RWO multi-attach errors during rolling updates.
+# ---------------------------------------------------------------------------
+persistence:
+  appData:
+    size: "5Gi"
+    accessMode: ReadWriteOnce
+  storageClass: ""  # Empty uses cluster default. Override: STORAGE_CLASS=gp3-csi
